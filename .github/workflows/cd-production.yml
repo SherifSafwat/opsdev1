@@ -1,0 +1,75 @@
+yamlname: Deploy to Production
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  KUBE_NAMESPACE: production
+  APP_NAME: task-api
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+    - name: Blue-Green Deployment
+      run: |
+        # Get current deployment color
+        CURRENT_COLOR=$(kubectl get deployment ${{ env.APP_NAME }}-blue -n ${{ env.KUBE_NAMESPACE }} -o jsonpath='{.metadata.labels.active}' 2>/dev/null || echo "false")
+        
+        if [ "$CURRENT_COLOR" = "true" ]; then
+          NEW_COLOR="green"
+          OLD_COLOR="blue"
+        else
+          NEW_COLOR="blue"
+          OLD_COLOR="green"
+        fi
+        
+        echo "Deploying to $NEW_COLOR environment"
+        
+        # Update deployment with new image
+        sed -i "s|IMAGE_TAG|${{ github.ref_name }}|g" k8s/deployment-$NEW_COLOR.yaml
+        kubectl apply -f k8s/deployment-$NEW_COLOR.yaml -n ${{ env.KUBE_NAMESPACE }}
+        
+        # Wait for new deployment
+        kubectl rollout status deployment/${{ env.APP_NAME }}-$NEW_COLOR -n ${{ env.KUBE_NAMESPACE }}
+        
+        # Run health checks on new deployment
+        kubectl wait --for=condition=available deployment/${{ env.APP_NAME }}-$NEW_COLOR -n ${{ env.KUBE_NAMESPACE }} --timeout=300s
+        
+        # Switch traffic to new deployment
+        kubectl patch service ${{ env.APP_NAME }} -n ${{ env.KUBE_NAMESPACE }} -p '{"spec":{"selector":{"version":"'$NEW_COLOR'"}}}'
+        
+        # Mark new deployment as active
+        kubectl label deployment ${{ env.APP_NAME }}-$NEW_COLOR active=true -n ${{ env.KUBE_NAMESPACE }} --overwrite
+        kubectl label deployment ${{ env.APP_NAME }}-$OLD_COLOR active=false -n ${{ env.KUBE_NAMESPACE }} --overwrite
+        
+        echo "Successfully deployed to production ($NEW_COLOR)"
+
+    - name: Post-deployment tests
+      run: |
+        # Wait for DNS propagation
+        sleep 60
+        
+        # Run comprehensive tests
+        npm run test:e2e
+      env:
+        API_BASE_URL: https://api.taskmanager.com
+
+    - name: Cleanup old deployment
+      run: |
+        # Keep old deployment for quick rollback (scale to 0)
+        OLD_COLOR=$(kubectl get deployment -l "app=${{ env.APP_NAME }},active=false" -n ${{ env.KUBE_NAMESPACE }} -o jsonpath='{.items[0].metadata.labels.version}')
+        kubectl scale deployment ${{ env.APP_NAME }}-$OLD_COLOR --replicas=0 -n ${{ env.KUBE_NAMESPACE }}
