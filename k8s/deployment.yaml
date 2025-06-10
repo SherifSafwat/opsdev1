@@ -1,0 +1,73 @@
+yamlapiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  labels:
+    app: task-api
+    version: blue
+    active: "true"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: task-api
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: task-api
+        version: blue
+    spec:
+      containers:
+      - name: task-api
+        image: username/task-api:IMAGE_TAG
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              name: task-api-secrets
+              key: mongodb-uri
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: task-api-secrets
+              key: jwt-secret
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      imagePullSecrets:
+      - name: docker-registry-secret
+k8s/service.yaml
+yamlapiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+spec:
+  selector:
+    app: task-api
+    version: blue
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+  type: LoadBalancer
